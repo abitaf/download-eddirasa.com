@@ -1,81 +1,85 @@
-const axios = require('axios');
-const cheerio = require('cheerio');
-const fs = require('fs');
-const path = require('path');
-const url = require('url');
-const axiosRetry = require('axios-retry');
+const axios = require('axios')
+const cheerio = require('cheerio')
+const fs = require('fs')
+const path = require('path')
+const axiosRetry = require('axios-retry').default
 
-// URL de la page à scraper
-const page = 'https://eddirasa.com/ens-cm/4am/maths/';
-const downloadDirectory = './downloads';
+// Configuration
+const page = 'https://eddirasa.com/ens-cm/4am/maths/'
+const downloadDirectory = './downloads'
+
+// Initialisation du répertoire de téléchargement
 if (!fs.existsSync(downloadDirectory)) {
-  fs.mkdirSync(downloadDirectory);
+  fs.mkdirSync(downloadDirectory)
 }
 
-// Fonction pour télécharger le fichier PDF à partir d'un lien href
+// Configuration d'axios-retry
+axiosRetry(axios, {
+  retries: 3,
+  retryDelay: axiosRetry.exponentialDelay, // Utilise un délai exponentiel pour les retries
+  shouldResetTimeout: true,
+  retryCondition: (error) => {
+    // Retry uniquement sur erreurs réseau ou codes d'erreur spécifiques
+    return axiosRetry.isNetworkOrIdempotentRequestError(error) || error.response?.status >= 500
+  },
+  onRetry: (retryCount, error) => {
+    console.log(`🔄 Retry attempt #${retryCount} for: ${error.config.url}`)
+  }
+})
+
+// Fonction pour télécharger un fichier PDF
 const downloadPdf = async (pdfUrl) => {
-  const parsedUrl = url.parse(pdfUrl);
-  const pathname = parsedUrl.pathname;
-  const filename = pathname.split('/').pop();
-
-  const filePath = path.join(downloadDirectory, filename);
-
-  if (fs.existsSync(filePath)) {
-    console.log(`File ${filename} already exists.`);
-    return;
-  }
-
-  let response = null;
   try {
-    response = await axios({
-      method: 'GET',
-      url: pdfUrl,
-      responseType: 'arraybuffer',
-    });
-  } catch (error) {}
+    const filename = path.basename(new URL(pdfUrl).pathname)
+    const filePath = path.join(downloadDirectory, filename)
 
-  const isDataAvailable = response?.data && response.data.length;
-  if (!isDataAvailable) {
-    console.log(`Error downloading file "${filename}"`);
-    return;
+    if (fs.existsSync(filePath)) {
+      console.log(`✅ Fichier déjà existant : ${filename}`)
+      return
+    }
+
+    const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' })
+    fs.writeFileSync(filePath, response.data)
+    console.log(`✅ Téléchargé et sauvegardé : ${filename}`)
+  } catch (error) {
+    console.error(`❌ Erreur lors du téléchargement : ${pdfUrl}\n`, error.message)
   }
-
-  fs.writeFile(filePath, response.data, 'binary', (err) => {
-    if (err) console.log(`Error saving file "${filename}"`);
-    console.log(`${filename} file has been saved!`);
-  });
-};
+}
 
 // Fonction principale de scraping
 const scrape = async () => {
   try {
-    axiosRetry(axios, {
-      retries: 3,
-      retryDelay: (retryCount) => retryCount * 1000,
-      shouldResetTimeout: true,
-    });
+    console.log(`🔍 Récupération de la page principale : ${page}`)
+    const response = await axios.get(page)
+    const $ = cheerio.load(response.data)
 
-    const response = await axios.get(page);
-    const $ = cheerio.load(response.data);
+    // Extraire tous les liens pertinents
+    const links = $('.item-list-exams a.btn.btn-outline-secondary')
 
-    // Extraire tous les liens href avec la classe "btn btn-outline-secondary"
-    const links = $('.item-list-exams a.btn.btn-outline-secondary');
-
-    // Boucle à travers tous les liens extraits
     for (let i = 0; i < links.length; i++) {
-      const link = links[i];
+      const href = $(links[i]).attr('href')
+      if (!href) continue
 
-      // Visiter chaque lien et extraire le lien href du fichier PDF
-      const linkResponse = await axios.get($(link).attr('href'));
-      const link$ = cheerio.load(linkResponse.data);
-      const pdfLink = link$('.btn.btn-danger').attr('href');
-      if (!pdfLink) continue;
-      // Télécharger le fichier PDF
-      if (pdfLink.length > page.length) await downloadPdf(pdfLink);
+      try {
+        console.log(`🔗 Visite de : ${href}`)
+        const linkResponse = await axios.get(href)
+        const link$ = cheerio.load(linkResponse.data)
+        const pdfLink = link$('.btn.btn-danger').attr('href')
+
+        if (pdfLink) {
+          await downloadPdf(pdfLink)
+        } else {
+          console.log(`⚠️ Aucun lien PDF trouvé sur : ${href}`)
+        }
+      } catch (linkError) {
+        console.error(`❌ Erreur lors de la visite du lien : ${href}\n`, linkError.message)
+      }
     }
+    console.log(`✅ Scraping terminé.`)
   } catch (error) {
-    console.error(error);
+    console.error(`❌ Erreur générale : ${error.message}`)
   }
-};
+}
 
-scrape();
+// Lancer le script de scraping
+scrape()
